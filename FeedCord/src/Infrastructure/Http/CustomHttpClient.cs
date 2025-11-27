@@ -16,6 +16,11 @@ namespace FeedCord.Infrastructure.Http
         private readonly ILogger<CustomHttpClient> _logger;
         private readonly SemaphoreSlim _throttle;
         private readonly ConcurrentDictionary<string, string> _userAgentCache;
+        // Rate limiting fields
+        private readonly SemaphoreSlim _rateLimiter = new SemaphoreSlim(1, 1);
+        private DateTime _lastPostTime = DateTime.MinValue;
+        private readonly TimeSpan _minPostInterval = TimeSpan.FromSeconds(2);
+
         public CustomHttpClient(ILogger<CustomHttpClient> logger, HttpClient innerClient, SemaphoreSlim throttle)
         {
             _logger = logger;
@@ -206,15 +211,37 @@ namespace FeedCord.Infrastructure.Http
 
         private async Task<HttpResponseMessage> PostThrottledAsync(string url, HttpContent content)
         {
-            await _throttle.WaitAsync();
+            // Discord rate limits per webhook, independently of how many feed
+            // requests are in flight, so posts are serialised and spaced on their
+            // own gate before taking a permit from the general throttle. Held in
+            // this order only - a permit is never held while waiting on the gate.
+            await _rateLimiter.WaitAsync();
 
             try
             {
-                return await _innerClient.PostAsync(url, content);
+                // Enforce 1 request per 2 seconds
+                var waitTime = _minPostInterval - (DateTime.UtcNow - _lastPostTime);
+                if (waitTime > TimeSpan.Zero)
+                {
+                    await Task.Delay(waitTime);
+                }
+
+                _lastPostTime = DateTime.UtcNow;
+
+                await _throttle.WaitAsync();
+
+                try
+                {
+                    return await _innerClient.PostAsync(url, content);
+                }
+                finally
+                {
+                    _throttle.Release();
+                }
             }
             finally
             {
-                _throttle.Release();
+                _rateLimiter.Release();
             }
         }
     }
