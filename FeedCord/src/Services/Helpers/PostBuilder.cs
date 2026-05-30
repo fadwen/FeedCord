@@ -68,11 +68,11 @@ namespace FeedCord.Services.Helpers
             int trim,
             string imageUrl)
         {
-            if (feed.Link.Contains("reddit.com"))
+            if (feed.Link?.Contains("reddit.com") == true)
             {
                 return TryBuildRedditPost(post, feed, trim, imageUrl);
             }
-            else if (post.Id.Contains("gitlab.com"))
+            else if (post.Id?.Contains("gitlab.com") == true)
             {
                 return TryBuildGitlabPost(post, feed, trim, imageUrl);
             }
