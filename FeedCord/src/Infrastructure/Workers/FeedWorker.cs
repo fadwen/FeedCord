@@ -62,7 +62,14 @@ namespace FeedCord.Infrastructure.Workers
                     throw;
                 }
 
-                
+                // Persist after every successful cycle, not only on a graceful
+                // shutdown. If the process hangs or is killed ungracefully,
+                // OnShutdown never runs and the watermark would otherwise be
+                // stuck at whatever the last clean-shutdown save captured -
+                // potentially hours or days stale. Saving here means an
+                // ungraceful death only ever loses at most one check interval's
+                // worth of progress.
+                PersistState();
 
                 _logAggregator.SetEndTime(DateTime.Now);
 
@@ -92,8 +99,13 @@ namespace FeedCord.Infrastructure.Workers
 
         private void OnShutdown()
         {
+            PersistState();
+        }
+
+        private void PersistState()
+        {
             if (!_persistent) return;
-            
+
             var data = _feedManager.GetAllFeedData();
             SaveDataToCsv(data);
         }
@@ -126,7 +138,7 @@ namespace FeedCord.Infrastructure.Workers
                 using var writer = new StreamWriter(filePath, append: false);
                 foreach (var (key, value) in existing)
                 {
-                    writer.WriteLine($"{key},{value.IsYoutube},{value.LastRunDate}");
+                    writer.WriteLine($"{key},{value.IsYoutube},{value.LastRunDate:yyyy-MM-ddTHH:mm:ss}");
                 }
             }
             finally
