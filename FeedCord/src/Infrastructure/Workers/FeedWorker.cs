@@ -1,5 +1,6 @@
 ﻿using FeedCord.Common;
 using FeedCord.Core.Interfaces;
+using FeedCord.Helpers;
 using FeedCord.Services.Interfaces;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -97,14 +98,40 @@ namespace FeedCord.Infrastructure.Workers
             SaveDataToCsv(data);
         }
 
+        // Guards against two FeedWorker instances (e.g. two configured Instances)
+        // reading/writing feed_dump.csv at the same moment during shutdown.
+        private static readonly SemaphoreSlim CsvWriteLock = new(1, 1);
+
         private void SaveDataToCsv(IReadOnlyDictionary<string, FeedState> data)
         {
             var filePath = Path.Combine(AppContext.BaseDirectory, "feed_dump.csv");
-            using var writer = new StreamWriter(filePath, append: true);
 
-            foreach (var (key, value) in data)
+            CsvWriteLock.Wait();
+            try
             {
-                writer.WriteLine($"{key},{value.IsYoutube},{DateTime.Now}");
+                // Read whatever's already there (including rows written by other
+                // Instances) so we only ever update our own URLs' rows instead of
+                // blindly overwriting the whole file.
+                var existing = CsvReader.LoadReferencePosts(filePath);
+
+                foreach (var (key, value) in data)
+                {
+                    existing[key] = new ReferencePost
+                    {
+                        IsYoutube = value.IsYoutube,
+                        LastRunDate = DateTime.Now
+                    };
+                }
+
+                using var writer = new StreamWriter(filePath, append: false);
+                foreach (var (key, value) in existing)
+                {
+                    writer.WriteLine($"{key},{value.IsYoutube},{value.LastRunDate}");
+                }
+            }
+            finally
+            {
+                CsvWriteLock.Release();
             }
         }
     }
