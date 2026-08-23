@@ -15,6 +15,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Console;
 using System.ComponentModel.DataAnnotations;
+using System.Net;
 using System.Text.Json;
 
 namespace FeedCord
@@ -66,7 +67,13 @@ namespace FeedCord
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " + 
                     "(KHTML, like Gecko) Chrome/104.0.5112.79 Safari/537.36"
                 );
-            }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler(){AllowAutoRedirect = true});
+            }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+            {
+                AllowAutoRedirect = true,
+                // Without this, no Accept-Encoding is sent and every feed is
+                // fetched uncompressed -- typically 3-4x more bytes per poll.
+                AutomaticDecompression = DecompressionMethods.All
+            });
 
             var concurrentRequests = ctx.Configuration.GetValue("ConcurrentRequests", 20);
 
