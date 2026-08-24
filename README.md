@@ -8,6 +8,20 @@ FeedCord is designed to be a 'turn key' automated RSS feed reader with the main 
 
 Use it for increasing community engagement and activity or just for your own personal use. The combination of FeedCord and Discord's Forum Channels can really shine to make a vibrant news feed featuring gallery-style display alongside custom threads, creating an engaging space for your private community discussions.
 
+---
+
+## About this fork
+
+This is a fork of **[Qolors/FeedCord](https://github.com/Qolors/FeedCord)**, and it exists for exactly one reason: upstream has gone quiet. There have been no commits since [1 July 2025](https://github.com/Qolors/FeedCord/commits/master), community pull requests have sat unreviewed for months, and the open issue asking [whether the project will continue](https://github.com/Qolors/FeedCord/issues/95) has not been answered.
+
+**All credit for FeedCord belongs to [Qolors](https://github.com/Qolors).** The idea, the design, and essentially all of the code are theirs — this fork is a small stack of patches sitting on top of their work. Thank you for building it, and for releasing it under the MIT license so the rest of us could keep it running.
+
+This is not a competing project and is not trying to become one. Fixes made here are offered back upstream wherever they apply cleanly — currently [#98](https://github.com/Qolors/FeedCord/pull/98) and [#99](https://github.com/Qolors/FeedCord/pull/99) — and if upstream picks up again, that is the better home for this work.
+
+What this fork changes is summarised in the [fork changelog](#fork-changes) and documented in full in [PATCHES.md](PATCHES.md).
+
+---
+
 ### An example of what FeedCord can bring to your server
 
 ---
@@ -184,8 +198,6 @@ With the above steps completed, FeedCord should now be running and posting updat
 > rather than 10N, which matters when persisted state lets a restart deliver a
 > real backlog.
 
-<a href="https://www.buymeacoffee.com/Qolors" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
-
 ---
 
 # Changelog
@@ -194,6 +206,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## Fork changes
+
+Changes carried in this fork that are not in upstream `master`. Each has a full technical write-up in [PATCHES.md](PATCHES.md).
+
+<details open>
+ <summary>Unreleased — on top of upstream [3.0.0]</summary>
+
+### Fixed
+
+- **The poll loop could stall permanently.** A singleton `SemaphoreSlim` was acquired re-entrantly in `CustomHttpClient`, so the first non-2xx response could deadlock every feed until the container was restarted. ([`3df4626`](https://github.com/fadwen/FeedCord/commit/3df4626)) — offered upstream as [#98](https://github.com/Qolors/FeedCord/pull/98)
+- **Feed items missing `link` or `id` threw during parsing.** ([`a6507a5`](https://github.com/fadwen/FeedCord/commit/a6507a5)) — cherry-picked from [Morgyn](https://github.com/Morgyn)'s upstream PR [#97](https://github.com/Qolors/FeedCord/pull/97)
+- **One malformed item discarded every post from that feed for the cycle.** Item parsing is now isolated per entry, so a bad entry is logged and skipped instead of blocking the feed. ([`ca54997`](https://github.com/fadwen/FeedCord/commit/ca54997))
+- **`feed_dump.csv` was destroyed by container recreation, and multiple Instances clobbered each other's rows.** Persistence is now a semaphore-guarded read-merge-write. ([`0c7d6f3`](https://github.com/fadwen/FeedCord/commit/0c7d6f3)) — cherry-picked from [Sepperlot](https://github.com/sepperlot) ([`157303f`](https://github.com/sepperlot/FeedCord/commit/157303fde5cea71fb5e9cbaf60154cc31fc17809))
+- **State was saved only on a graceful shutdown.** It is now persisted after every check cycle, so an ungraceful stop loses at most one interval's progress. ([`298b4ab`](https://github.com/fadwen/FeedCord/commit/298b4ab)) — cherry-picked from [Sepperlot](https://github.com/sepperlot) ([`fb27bb4`](https://github.com/sepperlot/FeedCord/commit/fb27bb45dce83169a96c3f19a626a110060f164b))
+
+### Changed
+
+- **Feed requests now negotiate compression.** `AutomaticDecompression` is enabled, so `Accept-Encoding` is sent and feeds transfer 3–4x smaller. ([`25fdb0b`](https://github.com/fadwen/FeedCord/commit/25fdb0b)) — offered upstream as [#99](https://github.com/Qolors/FeedCord/pull/99)
+- **Discord posts are spaced 2 seconds apart in the HTTP client** instead of 10 seconds in the notifier, taking a backlog of N posts from roughly 10N seconds to 2N. ([`8b3b4d0`](https://github.com/fadwen/FeedCord/commit/8b3b4d0), cherry-picked from [Kamdzy](https://github.com/Kamdzy) ([`fb0d574`](https://github.com/Kamdzy/FeedCord/commit/fb0d5748e2f23c6dc2509a9ff0ef1d179af81656)), and [`4c591ea`](https://github.com/fadwen/FeedCord/commit/4c591ea) removing the old sleep)
+- **`feed_dump.csv` timestamps are written as ISO 8601.** Old and new rows both still read correctly, so no migration is needed. ([`298b4ab`](https://github.com/fadwen/FeedCord/commit/298b4ab))
+
+</details>
+
+
+## Upstream releases
+
+Releases from [Qolors/FeedCord](https://github.com/Qolors/FeedCord), preserved as-is.
 
 <details>
  <summary>[3.0.0] - 2025-02-10</summary>
