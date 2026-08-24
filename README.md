@@ -18,7 +18,7 @@ This is a fork of **[Qolors/FeedCord](https://github.com/Qolors/FeedCord)**, and
 
 This is not a competing project and is not trying to become one. Fixes made here are offered back upstream wherever they apply cleanly — currently [#98](https://github.com/Qolors/FeedCord/pull/98) and [#99](https://github.com/Qolors/FeedCord/pull/99) — and if upstream picks up again, that is the better home for this work.
 
-What this fork changes is summarised in the [fork changelog](#fork-changes) and documented in full in [PATCHES.md](PATCHES.md).
+What this fork changes is summarized in the [fork changelog](#fork-changes) and documented in full in [PATCHES.md](PATCHES.md).
 
 ---
 
@@ -129,13 +129,25 @@ Now that your file is set up, you have two ways to run FeedCord
 
 ### Docker (Recommended)
 
+This fork is not published to any registry, so the image is built from source. The `Dockerfile` lives in the `FeedCord/` subdirectory, and `rebuild.sh` handles the build context for you:
+
+```sh
+git clone https://github.com/fadwen/FeedCord
+cd FeedCord
+./rebuild.sh
 ```
-docker pull qolors/feedcord:latest
+
+That produces `feedcord:local-gzip` — override the tag with `FEEDCORD_IMAGE` if you prefer another name. Be sure to update the volume path to your `appsettings.json`:
+
+```sh
+docker run --name FeedCord -v "/path/to/your/appsettings.json:/app/config/appsettings.json" feedcord:local-gzip
 ```
-Be sure to update the volume path to your `appsettings.json` 
-```
-docker run --name FeedCord -v "/path/to/your/appsettings.json:/app/config/appsettings.json" qolors/feedcord:latest
-```
+
+`./rebuild.sh /path/to/composedir` builds and then runs `docker compose up -d feedcord` in that directory, which is the quicker path when updating an existing deployment.
+
+> **Upstream's published image does not contain this fork's changes.** `qolors/feedcord:latest` is built from [Qolors/FeedCord](https://github.com/Qolors/FeedCord) and was last pushed in July 2025. Pull it if you want upstream's behavior rather than this fork's.
+>
+> Because the image is built locally and has no registry behind it, tools like Watchtower cannot check it for updates — disable them for this container (`com.centurylinklabs.watchtower.enable=false`) or they will log a failed check on every pass.
 
 > **Fork note — mount `feed_dump.csv` if you set `PersistenceOnShutdown: true`.**
 >
@@ -169,7 +181,7 @@ Install the [.NET SDK](dotnet.microsoft.com/download)
 
 Clone this repo
 ```
-git clone https://github.com/Qolors/FeedCord
+git clone https://github.com/fadwen/FeedCord
 ```
 Change Directory
 ```
