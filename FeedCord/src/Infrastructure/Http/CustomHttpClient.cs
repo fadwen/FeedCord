@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using FeedCord.Services.Interfaces;
@@ -24,10 +24,13 @@ namespace FeedCord.Infrastructure.Http
             _userAgentCache = new ConcurrentDictionary<string, string>();
         }
 
+        // The throttle is a process-wide singleton and SemaphoreSlim is not
+        // reentrant, so a permit must never be held across a call that goes on
+        // to acquire another one. Every outbound request therefore goes through
+        // one of the two helpers at the bottom of this class, which hold a
+        // permit for the duration of that single request and nothing more.
         public async Task<HttpResponseMessage?> GetAsyncWithFallback(string url)
         {
-            await _throttle.WaitAsync();
-            
             HttpResponseMessage? response = null;
 
             try
@@ -38,8 +41,8 @@ namespace FeedCord.Infrastructure.Http
                 {
                     request.Headers.UserAgent.ParseAdd(_userAgentCache.GetValueOrDefault(url, ""));
                 }
-                
-                response = await _innerClient.SendAsync(request);
+
+                response = await SendThrottledAsync(request);
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -60,10 +63,6 @@ namespace FeedCord.Infrastructure.Http
             {
                 _logger.LogError("An error occurred while processing the request for {Url}: {Ex}", url, ex);
             }
-            finally
-            {
-                _throttle.Release();
-            }
 
             return response;
         }
@@ -71,36 +70,25 @@ namespace FeedCord.Infrastructure.Http
 
         public async Task PostAsyncWithFallback(string url, StringContent forumChannelContent, StringContent textChannelContent, bool isForum)
         {
-            try
+            var response = await PostThrottledAsync(url, isForum ? forumChannelContent : textChannelContent);
+
+            if (response.StatusCode == HttpStatusCode.NoContent)
             {
-                await _throttle.WaitAsync();
-
-                var response = await _innerClient.PostAsync(url, isForum ? forumChannelContent : textChannelContent);
-                
-                _throttle.Release();
-
-                if (response.StatusCode != HttpStatusCode.NoContent)
-                {
-                    await _throttle.WaitAsync();
-
-                    _logger.LogError("Response Error: {ResponseError}", response.Content.ReadAsStringAsync().Result);
-
-                    response = await _innerClient.PostAsync(url, !isForum ? forumChannelContent : textChannelContent);
-
-                    if (response.StatusCode == HttpStatusCode.NoContent)
-                    {
-                        _logger.LogWarning(
-                            "Successfully posted to Discord Channel after switching channel type - Change Forum Property in Config!!");
-                    }
-                    else
-                    {
-                        _logger.LogError("Failed to post to Discord Channel after fallback attempts");
-                    }
-                }
+                return;
             }
-            finally
+
+            _logger.LogError("Response Error: {ResponseError}", await response.Content.ReadAsStringAsync());
+
+            response = await PostThrottledAsync(url, !isForum ? forumChannelContent : textChannelContent);
+
+            if (response.StatusCode == HttpStatusCode.NoContent)
             {
-                _throttle.Release();
+                _logger.LogWarning(
+                    "Successfully posted to Discord Channel after switching channel type - Change Forum Property in Config!!");
+            }
+            else
+            {
+                _logger.LogError("Failed to post to Discord Channel after fallback attempts");
             }
         }
 
@@ -109,54 +97,44 @@ namespace FeedCord.Infrastructure.Http
             var uri = new Uri(url);
             var baseUrl = uri.GetLeftPart(UriPartial.Authority);
 
-            //USER MIMICK
-            var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.UserAgent.ParseAdd(USER_MIMICK);
-
             try
             {
-                await _throttle.WaitAsync();
+                //USER MIMICK
+                var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.UserAgent.ParseAdd(USER_MIMICK);
 
-                var response = await _innerClient.SendAsync(request);
+                var response = await SendThrottledAsync(request);
                 if (response.IsSuccessStatusCode)
                 {
                     _userAgentCache.AddOrUpdate(url, USER_MIMICK, (_, _) => USER_MIMICK);
-                    _throttle.Release();
                     return response;
                 }
 
                 //GOOGLE FEED FETCHER
                 request = new HttpRequestMessage(HttpMethod.Get, url);
                 request.Headers.UserAgent.ParseAdd(GOOGLE_FEED_FETCHER);
-                await _throttle.WaitAsync();
-                response = await _innerClient.SendAsync(request);
+                response = await SendThrottledAsync(request);
 
                 if (response.IsSuccessStatusCode)
                 {
                     _userAgentCache.AddOrUpdate(url, GOOGLE_FEED_FETCHER, (_, _) => GOOGLE_FEED_FETCHER);
-                    _throttle.Release();
                     return response;
                 }
 
                 //USERAGENT SCRAPE
                 var robotsUrl = new Uri(new Uri(baseUrl), "/robots.txt").AbsoluteUri;
                 var userAgents = await GetRobotsUserAgentsAsync(robotsUrl);
-            
-                if (userAgents.Count > 0)
+
+                foreach (var userAgent in userAgents)
                 {
-                    foreach (var userAgent in userAgents)
+                    request = new HttpRequestMessage(HttpMethod.Get, url);
+                    request.Headers.UserAgent.ParseAdd(userAgent);
+                    request.Headers.Add("Accept", "*/*");
+                    response = await SendThrottledAsync(request);
+                    if (response.IsSuccessStatusCode)
                     {
-                        request = new HttpRequestMessage(HttpMethod.Get, url);
-                        request.Headers.UserAgent.ParseAdd(userAgent);
-                        request.Headers.Add("Accept", "*/*");
-                        await _throttle.WaitAsync();
-                        response = await _innerClient.SendAsync(request);
-                        if (response.IsSuccessStatusCode)
-                        {
-                            _userAgentCache.AddOrUpdate(url, userAgent, (_, _) => userAgent);
-                            _throttle.Release();
-                            return response;
-                        }
+                        _userAgentCache.AddOrUpdate(url, userAgent, (_, _) => userAgent);
+                        return response;
                     }
                 }
             }
@@ -164,18 +142,16 @@ namespace FeedCord.Infrastructure.Http
             {
                 _logger.LogError("Failed to fetch RSS Feed after fallback attempts: {Url} - {E}", url, e);
             }
-            finally
-            {
-                _throttle.Release();
-            }
+
             return oldResponse;
         }
 
         private async Task<string> FetchRobotsContentAsync(string url)
         {
+            await _throttle.WaitAsync();
+
             try
             {
-                await _throttle.WaitAsync();
                 return await _innerClient.GetStringAsync(url);
             }
             catch
@@ -212,6 +188,34 @@ namespace FeedCord.Infrastructure.Http
             }
 
             return userAgents.OrderByDescending(x => x).Distinct().ToList();
+        }
+
+        private async Task<HttpResponseMessage> SendThrottledAsync(HttpRequestMessage request)
+        {
+            await _throttle.WaitAsync();
+
+            try
+            {
+                return await _innerClient.SendAsync(request);
+            }
+            finally
+            {
+                _throttle.Release();
+            }
+        }
+
+        private async Task<HttpResponseMessage> PostThrottledAsync(string url, HttpContent content)
+        {
+            await _throttle.WaitAsync();
+
+            try
+            {
+                return await _innerClient.PostAsync(url, content);
+            }
+            finally
+            {
+                _throttle.Release();
+            }
         }
     }
 }
