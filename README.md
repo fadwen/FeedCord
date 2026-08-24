@@ -16,7 +16,7 @@ This is a fork of **[Qolors/FeedCord](https://github.com/Qolors/FeedCord)**, and
 
 **All credit for FeedCord belongs to [Qolors](https://github.com/Qolors).** The idea, the design, and essentially all of the code are theirs — this fork is a small stack of patches sitting on top of their work. Thank you for building it, and for releasing it under the MIT license so the rest of us could keep it running.
 
-This is not a competing project and is not trying to become one. Fixes made here are offered back upstream wherever they apply cleanly — currently [#98](https://github.com/Qolors/FeedCord/pull/98) and [#99](https://github.com/Qolors/FeedCord/pull/99) — and if upstream picks up again, that is the better home for this work.
+This is not a competing project and is not trying to become one. Fixes made here are offered back upstream wherever they apply cleanly — currently [#98](https://github.com/Qolors/FeedCord/pull/98), [#99](https://github.com/Qolors/FeedCord/pull/99) and [#100](https://github.com/Qolors/FeedCord/pull/100) — and if upstream picks up again, that is the better home for this work.
 
 What this fork changes is summarized in the [fork changelog](#fork-changes) and documented in full in [PATCHES.md](PATCHES.md).
 
@@ -230,7 +230,7 @@ Changes carried in this fork that are not in upstream `master`. Each has a full 
 
 - **The poll loop could stall permanently.** A singleton `SemaphoreSlim` was acquired re-entrantly in `CustomHttpClient`, so the first non-2xx response could deadlock every feed until the container was restarted. ([`3df4626`](https://github.com/fadwen/FeedCord/commit/3df4626)) — offered upstream as [#98](https://github.com/Qolors/FeedCord/pull/98)
 - **Feed items missing `link` or `id` threw during parsing.** ([`a6507a5`](https://github.com/fadwen/FeedCord/commit/a6507a5)) — cherry-picked from [Morgyn](https://github.com/Morgyn)'s upstream PR [#97](https://github.com/Qolors/FeedCord/pull/97)
-- **One malformed item discarded every post from that feed for the cycle.** Item parsing is now isolated per entry, so a bad entry is logged and skipped instead of blocking the feed. ([`ca54997`](https://github.com/fadwen/FeedCord/commit/ca54997))
+- **One malformed item discarded every post from that feed for the cycle.** Item parsing is now isolated per entry, so a bad entry is logged and skipped instead of blocking the feed. ([`ca54997`](https://github.com/fadwen/FeedCord/commit/ca54997)) — offered upstream as [#100](https://github.com/Qolors/FeedCord/pull/100)
 - **`feed_dump.csv` was destroyed by container recreation, and multiple Instances clobbered each other's rows.** Persistence is now a semaphore-guarded read-merge-write. ([`0c7d6f3`](https://github.com/fadwen/FeedCord/commit/0c7d6f3)) — cherry-picked from [Sepperlot](https://github.com/sepperlot) ([`157303f`](https://github.com/sepperlot/FeedCord/commit/157303fde5cea71fb5e9cbaf60154cc31fc17809))
 - **State was saved only on a graceful shutdown.** It is now persisted after every check cycle, so an ungraceful stop loses at most one interval's progress. ([`298b4ab`](https://github.com/fadwen/FeedCord/commit/298b4ab)) — cherry-picked from [Sepperlot](https://github.com/sepperlot) ([`fb27bb4`](https://github.com/sepperlot/FeedCord/commit/fb27bb45dce83169a96c3f19a626a110060f164b))
 
