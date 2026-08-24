@@ -123,6 +123,32 @@ Be sure to update the volume path to your `appsettings.json`
 docker run --name FeedCord -v "/path/to/your/appsettings.json:/app/config/appsettings.json" qolors/feedcord:latest
 ```
 
+> **Fork note — mount `feed_dump.csv` if you set `PersistenceOnShutdown: true`.**
+>
+> The watermark of the last-seen post per feed is written to
+> `AppContext.BaseDirectory`, which is `/app` in the container. With only
+> `appsettings.json` mounted, that file lives in the container's writable layer
+> and is destroyed by any `docker run --rm`, `docker compose up --force-recreate`,
+> or image update. On the next start, feeds with no persisted entry baseline
+> their watermark to "now", so everything published while the container was down
+> is treated as already-seen and never posted.
+>
+> Enabling the setting alone does not survive a redeploy. Mount the file too, and
+> create it beforehand so Docker does not create a directory in its place:
+>
+> ```sh
+> touch /path/to/feed_dump.csv
+> docker run --name FeedCord \
+>   -v "/path/to/appsettings.json:/app/config/appsettings.json" \
+>   -v "/path/to/feed_dump.csv:/app/feed_dump.csv" \
+>   feedcord
+> ```
+>
+> The file must be writable by the container's user (`APP_UID`, 1654 by default).
+> This fork also saves the watermark after every check cycle rather than only on
+> a graceful shutdown, so a container that is killed or hangs loses at most one
+> interval's progress instead of everything since the last clean stop.
+
 ### Build From Source
 
 Install the [.NET SDK](dotnet.microsoft.com/download)
@@ -150,6 +176,13 @@ dotnet run -- path\to\your\appsettings.json
 
 
 With the above steps completed, FeedCord should now be running and posting updates from your RSS feeds directly to your Discord channel.
+
+> **Fork note — posting cadence.** Upstream sleeps a fixed 10 seconds after every
+> post, including the last one in a batch. This fork instead spaces posts 2
+> seconds apart inside the HTTP client, which is where the original code's own
+> TODO said the concern belonged. A backlog of N posts takes roughly 2N seconds
+> rather than 10N, which matters when persisted state lets a restart deliver a
+> real backlog.
 
 <a href="https://www.buymeacoffee.com/Qolors" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
 

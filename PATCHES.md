@@ -1,8 +1,9 @@
 # Fork notes
 
 This is a fork of [Qolors/FeedCord](https://github.com/Qolors/FeedCord) carrying
-three local patches. `master` is upstream `master` plus those commits, and the
-image is built from source rather than pulled from a registry.
+five local patches. `master` is upstream `master` plus those commits, and the
+image is built from source rather than pulled from a registry. Several are
+cherry-picked from other forks and keep their original author.
 
 Everything else tracks upstream unchanged.
 
@@ -71,11 +72,31 @@ blocks forever waiting for a permit that only the blocked tasks can release.
 Every feed stops. Note this is not a network stall -- the hardcoded 30s
 `httpClient.Timeout` never fires because no request is outstanding.
 
-The same file also released the semaphore twice on several paths
-(`TryAlternativeAsync` released on each success path *and* again in its
-`finally`; `PostAsyncWithFallback` released at line 80 *and* in its `finally`),
-so the permit count drifted upward over time and the throttle stopped bounding
-anything.
+The same file also mismatched acquire and release counts on every path
+through `TryAlternativeAsync`, which acquired once per attempt but released
+only once inline plus once in its `finally`:
+
+| path | acquires | releases | net |
+| ---- | -------- | -------- | --- |
+| succeeds on attempt 1 | 1 | 2 | **+1 (over-release)** |
+| succeeds on attempt 2 | 2 | 2 | 0 |
+| succeeds on robots attempt *k* | 2 + *k* | 2 | **leaks *k*** |
+| all attempts fail | 2 + *N* | 1 | **leaks 1 + *N*** |
+
+`PostAsyncWithFallback` similarly released at line 80 *and* in its `finally`.
+
+This leak is what made the hang inevitable rather than merely possible. Pure
+reentrancy needs `ConcurrentRequests` feeds to fail at the same moment; the
+leak instead shrinks the pool a little on every trip through the fallback path
+until it reaches zero, at which point even a single feed blocks. It explains
+the observed pattern -- healthy for a while after each restart, then dead --
+better than reentrancy alone.
+
+Credit for spotting the leak framing goes to
+[sepperlot](https://github.com/sepperlot/FeedCord), who fixed the same bug
+independently by keeping one permit for the whole fallback sequence and
+stripping the nested acquires. Both approaches are correct. This fork keeps the
+narrower one so a permit is only held for the duration of a single request.
 
 The patch routes every outbound request through one of three leaf helpers --
 `SendThrottledAsync`, `PostThrottledAsync`, `FetchRobotsContentAsync` -- each of
@@ -159,6 +180,82 @@ Nothing in the deployed feed list currently triggers this. All 22 feeds carry a
 channel-level `<link>`, and no item is missing `guid` or `link`. The patch is
 insurance against a third-party publisher shipping a malformed entry, whose
 symptom would otherwise be one feed quietly going dark.
+
+## Patch 4: make restarts stop losing posts
+
+**File:** `FeedCord/src/Infrastructure/Workers/FeedWorker.cs`
+
+Two commits cherry-picked unchanged from
+[sepperlot/FeedCord](https://github.com/sepperlot/FeedCord), retaining their
+authorship:
+
+- `157303fd` -- write `feed_dump.csv` via read-merge-write instead of
+  append-only, so the file stops growing with duplicate historical rows and
+  multiple configured Instances cannot clobber each other's saved rows.
+- `fb27bb45` -- persist after every check cycle rather than only from
+  `OnShutdown`, and write the timestamp as ISO 8601. `OnShutdown` fires from
+  `ApplicationStopping`, which never runs if the process is killed or hangs --
+  exactly the failure mode Patch 2 addresses. An ungraceful death now costs at
+  most one interval of progress.
+
+The ISO timestamp matters because `CsvReader` parses with
+`CultureInfo.InvariantCulture` while the old write used `{DateTime.Now}`, which
+formats using the *current* culture. That round-trips only as long as the
+container's culture stays invariant.
+
+### The part that is not in the code
+
+`SaveDataToCsv` writes to `AppContext.BaseDirectory`, which is `/app` in the
+container. Mounting only `appsettings.json` leaves the watermark in the
+container's writable layer, where every `docker compose up -d` recreate --
+including every `rebuild.sh` run -- destroys it. Feeds with no persisted entry
+baseline to `DateTime.Now`, so everything published during the downtime is
+treated as already-seen.
+
+**Setting `PersistenceOnShutdown: true` on its own therefore changes nothing
+under Docker.** The compose service must also mount the file, and it must be
+created in advance and writable by `APP_UID`. See `FEEDCORD_DEPLOYMENT.md`.
+
+### Verifying
+
+Two containers, identical but for the setting, against a local feed. Baseline a
+one-item feed, stop, publish a second item while both are down, restart:
+
+| arm | new posts detected on restart | posted |
+| --- | ---------------------------- | ------ |
+| `PersistenceOnShutdown: false` (previous config) | none -- listed as "extracted", classified not-new | 0 |
+| `true` + mounted `feed_dump.csv` | 1 | 1 |
+
+The watermark also advanced between cycles (`23:13:23` then `23:14:46`),
+confirming the per-cycle save rather than shutdown-only.
+
+## Patch 5: space Discord posts in the HTTP client
+
+**Files:** `FeedCord/src/Infrastructure/Http/CustomHttpClient.cs`,
+`FeedCord/src/Infrastructure/Notifiers/DiscordNotifier.cs`
+
+`fb0d5748` cherry-picked from [Kamdzy/FeedCord](https://github.com/Kamdzy/FeedCord),
+retaining authorship: a dedicated gate that serialises Discord posts and spaces
+them 2 seconds apart, independent of the general request throttle.
+
+Adapted on the way in. This fork routes every outbound request through a leaf
+helper holding exactly one throttle permit, so the gate sits on
+`PostThrottledAsync` -- the single POST choke point -- which also spaces the
+channel-type fallback retry, not just the initial post. The gate is taken
+*before* the throttle permit and never the other way round, so the two
+semaphores cannot deadlock against each other.
+
+The follow-up commit is local. `DiscordNotifier` slept a fixed 10 seconds after
+every post, carrying a TODO saying the concern belonged in `CustomHttpClient`.
+With the gate in place that sleep is redundant, and because 10s dominated the
+2s gate it would have kept the cherry-picked change from ever binding -- which
+is its status in the source fork, where the sleep is still present. Removing it
+takes a backlog of N posts from 10N seconds to 2N, and stops a cycle that found
+one post from paying 10 seconds before finishing.
+
+This is not urgent on its own -- the deployment has never logged a Discord post
+failure -- but it pairs with Patch 4: persisted state means a restart can now
+deliver a genuine backlog, which is exactly when webhook rate limits bite.
 
 ## A known upstream issue this does NOT fix
 
