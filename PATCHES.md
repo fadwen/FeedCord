@@ -1,7 +1,7 @@
 # Fork notes
 
 This is a fork of [Qolors/FeedCord](https://github.com/Qolors/FeedCord) carrying
-two local patches. `master` is upstream `master` plus those commits, and the
+three local patches. `master` is upstream `master` plus those commits, and the
 image is built from source rather than pulled from a registry.
 
 Everything else tracks upstream unchanged.
@@ -106,6 +106,59 @@ This is an upstream bug, not something the compression patch introduced --
 though enabling `Accept-Encoding` changes the client's header fingerprint, and
 the Cloudflare-fronted origins in this feed set are the ones most likely to
 answer with a non-2xx, which is the path into the deadlock.
+
+## Patch 3: survive malformed items in a feed
+
+**Files:** `FeedCord/src/Services/Helpers/PostBuilder.cs`,
+`FeedCord/src/Services/RssParsingService.cs`
+
+Two commits. The first is a cherry-pick of upstream PR
+[#97](https://github.com/Qolors/FeedCord/pull/97) by Morgyn, unmodified,
+carried here because the PR has sat open since 2026-05-30 with no maintainer
+response. It null-guards the two dispatch checks in `TryBuildPost`:
+
+```csharp
+if (feed.Link?.Contains("reddit.com") == true)
+else if (post.Id?.Contains("gitlab.com") == true)
+```
+
+An RSS item with no `<guid>` leaves `post.Id` null, and the unguarded
+`.Contains` threw a `NullReferenceException`.
+
+The second commit is local. It addresses what #97 does not: the cost of *any*
+per-item exception, not just those two. `ParseRssFeedAsync` wrapped its whole
+item loop in one try/catch returning an empty list, so a single bad entry
+discarded **every** post from that feed for that cycle. The per-item work now
+sits in its own try/catch -- a failed entry is logged and skipped, the rest of
+the feed still returns, and a summary line reports how many were dropped. The
+outer catch is unchanged and still covers a document that cannot be read.
+
+This was never silent data loss: `FeedManager.CheckSingleFeedAsync` only
+advances `LastPublishDate` when it actually sees posts, so a discarded batch is
+retried on the next cycle. But the feed stays fully blocked for as long as the
+bad item sits in its window, which looks exactly like the publisher having gone
+quiet.
+
+### Verifying
+
+A synthetic three-item feed whose middle entry has no `<guid>`, served over
+HTTP to three builds:
+
+| build | items parsed | whole-feed NRE | items skipped |
+| ----- | ------------ | -------------- | ------------- |
+| pre-patch | 0 of 3 | yes, once per cycle | -- |
+| isolation only | 2 of 3 | no | 1 |
+| both commits | 3 of 3 | no | 0 |
+
+Against the real 22-feed set both commits are a no-op: 22/22 probed, zero
+parse errors, zero skips.
+
+### Note on the feed set
+
+Nothing in the deployed feed list currently triggers this. All 22 feeds carry a
+channel-level `<link>`, and no item is missing `guid` or `link`. The patch is
+insurance against a third-party publisher shipping a malformed entry, whose
+symptom would otherwise be one feed quietly going dark.
 
 ## A known upstream issue this does NOT fix
 

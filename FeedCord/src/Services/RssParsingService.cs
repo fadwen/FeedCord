@@ -39,17 +39,42 @@ namespace FeedCord.Services
 
                 List<Post?> posts = new();
 
+                var skipped = 0;
+
                 foreach (var post in feedItems)
                 {
-                    var rawXml = GetRawXmlForItem(post);
+                    // Isolated per item: one malformed entry must not discard the
+                    // whole batch. The outer catch still covers a document that
+                    // cannot be read at all.
+                    try
+                    {
+                        var rawXml = GetRawXmlForItem(post);
 
-                    var imageLink = await _imageParserService
-                        .TryExtractImageLink(post.Link, rawXml) 
-                                    ?? feed.ImageUrl;
+                        var imageLink = await _imageParserService
+                            .TryExtractImageLink(post.Link, rawXml) 
+                                        ?? feed.ImageUrl;
 
-                    var builtPost = PostBuilder.TryBuildPost(post, feed, trim, imageLink);
+                        var builtPost = PostBuilder.TryBuildPost(post, feed, trim, imageLink);
 
-                    posts.Add(builtPost);
+                        posts.Add(builtPost);
+                    }
+                    catch (Exception ex)
+                    {
+                        skipped++;
+
+                        _logger.LogWarning(
+                            "Skipping unparsable item {Item} from feed {Feed}: {Ex}",
+                            post.Id ?? post.Link ?? post.Title ?? "<no id, link or title>",
+                            feed.Link ?? feed.Title ?? "<unidentified feed>",
+                            ex);
+                    }
+                }
+
+                if (skipped > 0)
+                {
+                    _logger.LogWarning(
+                        "Skipped {Skipped} of {Total} items from feed {Feed} - the other {Kept} were parsed",
+                        skipped, feedItems.Count, feed.Link ?? feed.Title ?? "<unidentified feed>", posts.Count);
                 }
 
                 return posts;
