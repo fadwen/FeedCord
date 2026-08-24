@@ -1,12 +1,12 @@
 # Fork notes
 
 This is a fork of [Qolors/FeedCord](https://github.com/Qolors/FeedCord) carrying
-one local patch. `master` is upstream `master` plus that single commit, and the
+two local patches. `master` is upstream `master` plus those commits, and the
 image is built from source rather than pulled from a registry.
 
 Everything else tracks upstream unchanged.
 
-## The patch: negotiate compression on feed requests
+## Patch 1: negotiate compression on feed requests
 
 **File:** `FeedCord/src/Startup.cs`
 
@@ -43,6 +43,69 @@ timeout on a slow or contended link.
 That timeout is worth knowing about: it is hardcoded to 30 seconds in the same
 file (`httpClient.Timeout = TimeSpan.FromSeconds(30)`) and is not exposed as
 configuration.
+
+## Patch 2: stop the throttle deadlocking the poll loop
+
+**File:** `FeedCord/src/Infrastructure/Http/CustomHttpClient.cs`
+
+Symptom: the worker completes its startup probe, emits a burst of image-scrape
+warnings, and then goes permanently silent. The container stays up and healthy,
+the process sits at ~0% CPU with no open sockets, and the per-cycle
+`Batch Run for <id> finished` line never appears even once. Only a restart
+clears it, and it re-hangs on the first poll.
+
+Cause: `Startup.cs` registers a single `SemaphoreSlim(ConcurrentRequests)` as a
+**singleton**, shared by every `CustomHttpClient`. Upstream then acquires it
+re-entrantly:
+
+- `GetAsyncWithFallback` takes a permit and holds it for the whole method.
+- Still holding it, on any non-2xx it calls `TryAlternativeAsync`, which takes
+  a **second** permit.
+- That in turn calls `GetRobotsUserAgentsAsync` -> `FetchRobotsContentAsync`,
+  which takes a **third**.
+
+`SemaphoreSlim` is not reentrant. `FeedManager.CheckForNewPostsAsync` fans out
+over every feed with `Task.WhenAll`, so once `ConcurrentRequests` tasks are each
+holding a permit inside `GetAsyncWithFallback`, the first one to see a non-2xx
+blocks forever waiting for a permit that only the blocked tasks can release.
+Every feed stops. Note this is not a network stall -- the hardcoded 30s
+`httpClient.Timeout` never fires because no request is outstanding.
+
+The same file also released the semaphore twice on several paths
+(`TryAlternativeAsync` released on each success path *and* again in its
+`finally`; `PostAsyncWithFallback` released at line 80 *and* in its `finally`),
+so the permit count drifted upward over time and the throttle stopped bounding
+anything.
+
+The patch routes every outbound request through one of three leaf helpers --
+`SendThrottledAsync`, `PostThrottledAsync`, `FetchRobotsContentAsync` -- each of
+which acquires a permit immediately *before* its own `try` and releases it once
+in `finally`. No permit is ever held across a call that acquires another, and
+each acquire has exactly one matching release. `GetAsyncWithFallback` and
+`TryAlternativeAsync` no longer touch the semaphore at all.
+
+`PostAsyncWithFallback` also blocked on `.Result` inside an async method while
+holding a permit; that is now awaited.
+
+### Verifying
+
+Old and new images run side by side against the same feed set at a 1-minute
+interval, counting completed cycles:
+
+```sh
+docker logs <container> 2>&1 | grep -c 'Batch Run'
+```
+
+Over six minutes the pre-patch image completed 0 cycles with its network
+counters frozen after the first fetch; the patched image completed 3 with
+traffic climbing throughout.
+
+### Upstream
+
+This is an upstream bug, not something the compression patch introduced --
+though enabling `Accept-Encoding` changes the client's header fingerprint, and
+the Cloudflare-fronted origins in this feed set are the ones most likely to
+answer with a non-2xx, which is the path into the deadlock.
 
 ## A known upstream issue this does NOT fix
 
