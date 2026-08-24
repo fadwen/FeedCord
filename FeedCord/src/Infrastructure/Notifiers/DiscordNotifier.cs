@@ -1,4 +1,4 @@
-﻿using FeedCord.Common;
+using FeedCord.Common;
 using FeedCord.Core.Interfaces;
 using FeedCord.Services.Interfaces;
 
@@ -27,9 +27,6 @@ namespace FeedCord.Infrastructure.Notifiers
                 var textChannelContent = _discordPayloadService.BuildPayloadWithPost(post);
 
                 await _httpClient.PostAsyncWithFallback(_webhook, forumChannelContent, textChannelContent, _forum);
-
-                // TODO --> This is to prevent rate limiting from Discord API - Simple but eventually want to handle this in our CustomHttpClient
-                await Task.Delay(10000);
             }
         }
     }
