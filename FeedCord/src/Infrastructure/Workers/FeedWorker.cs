@@ -116,7 +116,7 @@ namespace FeedCord.Infrastructure.Workers
 
         private void SaveDataToCsv(IReadOnlyDictionary<string, FeedState> data)
         {
-            var filePath = Path.Combine(AppContext.BaseDirectory, "feed_dump.csv");
+            var filePath = CsvReader.DefaultFilePath;
 
             CsvWriteLock.Wait();
             try
@@ -131,14 +131,28 @@ namespace FeedCord.Infrastructure.Workers
                     existing[key] = new ReferencePost
                     {
                         IsYoutube = value.IsYoutube,
-                        LastRunDate = DateTime.Now
+                        // The feed's own watermark, not the wall clock. Saving
+                        // DateTime.Now here meant a restart baselined every feed
+                        // to the moment of the last save, so anything a
+                        // publisher back-dated behind that instant was invisible.
+                        LastRunDate = value.LastPublishDate,
+                        SeenIds = value.SeenPosts.Snapshot()
                     };
                 }
 
                 using var writer = new StreamWriter(filePath, append: false);
                 foreach (var (key, value) in existing)
                 {
-                    writer.WriteLine($"{key},{value.IsYoutube},{value.LastRunDate:yyyy-MM-ddTHH:mm:ss}");
+                    var fields = new List<string>
+                    {
+                        key,
+                        value.IsYoutube.ToString(),
+                        value.LastRunDate.ToString("yyyy-MM-ddTHH:mm:ss")
+                    };
+
+                    fields.AddRange(value.SeenIds);
+
+                    writer.WriteLine(Csv.FormatLine(fields));
                 }
             }
             finally

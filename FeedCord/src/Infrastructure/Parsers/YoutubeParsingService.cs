@@ -77,9 +77,12 @@ namespace FeedCord.Infrastructure.Parsers
                 var videoThumbnail = videoEntry.Element(mediaNs + "group")?.Element(mediaNs + "thumbnail")?.Attribute("url")?.Value ?? string.Empty;
                 var videoPublished = DateTime.Parse(videoEntry.Element(atomNs + "published")?.Value ?? DateTime.MinValue.ToString(CultureInfo.CurrentCulture));
                 var videoAuthor = videoEntry.Element(atomNs + "author")?.Element(atomNs + "name")?.Value ?? string.Empty;
+                // Atom <id> - "yt:video:<id>" - is the feed's own identity for the
+                // entry, and is what FeedManager matches against already-sent posts.
+                var videoId = videoEntry.Element(atomNs + "id")?.Value ?? videoLink;
                 
 
-                return new Post(videoTitle, videoThumbnail, string.Empty, videoLink, channelTitle, videoPublished, videoAuthor, Array.Empty<string>());
+                return new Post(videoTitle, videoThumbnail, string.Empty, videoLink, channelTitle, videoPublished, videoAuthor, Array.Empty<string>(), videoId);
             }
             catch (Exception ex)
             {
