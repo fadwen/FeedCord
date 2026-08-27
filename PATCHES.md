@@ -1,7 +1,7 @@
 # Fork notes
 
 This is a fork of [Qolors/FeedCord](https://github.com/Qolors/FeedCord) carrying
-five local patches. `master` is upstream `master` plus those commits, and the
+six local patches. `master` is upstream `master` plus those commits, and the
 image is built from source rather than pulled from a registry. Several are
 cherry-picked from other forks and keep their original author.
 
@@ -257,9 +257,196 @@ This is not urgent on its own -- the deployment has never logged a Discord post
 failure -- but it pairs with Patch 4: persisted state means a restart can now
 deliver a genuine backlog, which is exactly when webhook rate limits bite.
 
+## Patch 6: recognise posts by identity, not by publish date
+
+**Files:** `FeedCord/src/Services/FeedManager.cs`,
+`FeedCord/src/Common/SeenPostSet.cs`, `FeedCord/src/Common/FeedState.cs`,
+`FeedCord/src/Common/Post.cs`, `FeedCord/src/Common/ReferencePost.cs`,
+`FeedCord/src/Helpers/Csv.cs`, `FeedCord/src/Helpers/CsvReader.cs`,
+`FeedCord/src/Infrastructure/Workers/FeedWorker.cs`,
+`FeedCord/src/Services/Helpers/PostBuilder.cs`,
+`FeedCord/src/Infrastructure/Parsers/YoutubeParsingService.cs`
+
+Symptom: the poll loop runs normally, every cycle completes, and the log says
+`No new posts found` while the feed plainly has new items. Unlike Patch 2 this
+is not a stall — the batch runs, the feed is fetched and parsed, and the posts
+are then classified as already-seen.
+
+Reported upstream as [#94](https://github.com/Qolors/FeedCord/issues/94) by
+jdcoolha, with the same behaviour independently hit by Corban-Lee, Lucifer1590,
+w3bprinz and Cealgair.
+
+### Cause
+
+Upstream kept exactly one piece of per-feed state: a high-water publish date.
+
+```csharp
+var freshlyFetched = posts.Where(p => p?.PublishDate > feedState.LastPublishDate).ToList();
+
+if (freshlyFetched.Any())
+{
+    feedState.LastPublishDate = freshlyFetched.Max(p => p!.PublishDate);
+```
+
+There is no record of *which* posts were sent, only of how far the clock got.
+That makes three separate things go wrong, all from these two lines:
+
+1. **A back-dated item is invisible forever.** If a publisher adds an item whose
+   `pubDate` is behind the newest one already seen, it can never satisfy `>`.
+   No amount of waiting or restarting recovers it, because the watermark only
+   moves forward.
+2. **Items sharing a timestamp are dropped after the first.** The comparison is
+   strictly `>`, so a feed whose `pubDate`s carry no time component — every item
+   stamped `00:00:00` — posts exactly one item per day no matter how many it
+   publishes. This is jdcoolha's original diagnosis and it is correct.
+3. **The watermark jumps to the newest item in the batch, not the oldest.**
+   Anything that arrives later but is dated between those two is already behind
+   the line.
+
+A feed only needs to be slightly irregular to hit (1). The one Cealgair reported,
+`https://kaprestridge.github.io/pokebeach-news-feed/feed.xml`, is a GitHub Pages
+republish of a scraper whose publish workflow fires at uneven intervals — an
+11-hour gap between the `05:45Z` and `17:04Z` runs on 2026-08-27. The newest item
+in that build is stamped `Thu, 27 Aug 2026 09:03:00 GMT` against a
+`Last-Modified` of `17:05:20 GMT`, so it appeared roughly eight hours after its
+own publish time. Uniform lag alone loses nothing; *variable* lag across a feed
+that publishes several times a day reliably delivers an item behind a date some
+other item has already pushed the watermark to.
+
+### The change
+
+`FeedState` gains a `SeenPostSet`: the identities of posts already handled for
+that feed, bounded at 500 entries and evicted oldest-first. Identity is the
+feed's own — `<guid>` in RSS, `<id>` in Atom — falling back to the link, and then
+to title plus date for a feed that supplies neither. `Post` carries an `Id` for
+this purpose, populated in all four `PostBuilder` paths and in the YouTube
+parser.
+
+A post is new when its identity has not been seen before. The date survives only
+as a *floor*, and its job is now much smaller: stop a newly added feed dumping
+its entire backlog on first sight.
+
+The floor deliberately **does not** advance while the identity set still
+remembers everything it has been told, which for any realistic feed is always.
+Advancing it eagerly would re-create the original bug in miniature — one
+transiently truncated response would drag the floor up to the newest item it
+contained and strand everything published behind that. Only once the set is full,
+and entries genuinely start being evicted, does the floor take over as a backstop
+and advance to the oldest item the feed still carries. Anything older than that
+has fallen out of the document and cannot be offered to us again anyway.
+
+Identities are recorded *before* `PostFilters` are evaluated. A post the filters
+reject has still been seen, and re-testing it every cycle only repeats the same
+`omitted because it does not comply` line forever.
+
+Two smaller corrections come with it, both in code this patch had to touch:
+
+- `FeedWorker.SaveDataToCsv` persisted `LastRunDate = DateTime.Now` rather than
+  the feed's own watermark. A restart therefore baselined every feed to the
+  moment of the last save, so anything a publisher back-dated behind that instant
+  was invisible from then on. Verified against `upstream/master` — this is
+  upstream's, faithfully carried through the Patch 4 cherry-pick, not something
+  Patch 4 introduced. It now saves `value.LastPublishDate`.
+- `feedState.ErrorCount` was only cleared on a cycle that found new posts, so a
+  healthy but quiet feed accumulated errors against it and `EnableAutoRemove`
+  could drop it for being quiet. It now clears on any successful fetch.
+
+`FeedManager` also read `feed_dump.csv` by relative path while `FeedWorker` wrote
+it under `AppContext.BaseDirectory`. Those coincide under Docker (`WORKDIR /app`)
+but not when the process is started from another directory; both now go through
+`CsvReader.DefaultFilePath`.
+
+### The file format
+
+`feed_dump.csv` gains a variable-length tail of post identities:
+
+```
+url,isYoutube,lastPublishDate[,seenId...]
+```
+
+Identities are publisher-supplied strings that can legitimately contain commas
+and quotes, which the old `Split(',')` would mangle, so rows are now written and
+read as RFC 4180 (`FeedCord/src/Helpers/Csv.cs`). The reader is line-oriented, so
+identities are flattened to a single line before being stored.
+
+**No migration is needed.** A file written before the tail existed has exactly
+three columns and loads with an empty identity set. Its stored date still gates
+the first cycle after the upgrade, so nothing re-posts a backlog; from the second
+cycle on the identity set is doing the work.
+
+### Verifying
+
+A synthetic feed served over HTTP to two containers at a 1-minute interval, one
+built from upstream `master` plus Patches 1-5 (`feedcord:local-gzip`) and one
+with this patch. Both start against a feed holding a single item dated ten
+minutes in the past, so both correctly baseline and post nothing. Items are then
+added one at a time, a cycle apart, and the Discord webhook is pointed at a local
+sink that records what each arm sent.
+
+Writing T0 for the moment the containers started:
+
+| item added | its `pubDate` | why it matters | pre-patch | patched |
+| ---------- | ------------- | -------------- | --------- | ------- |
+| A | T0 - 10m | already there at startup | not posted | not posted |
+| B | T0 + 5m | ordinary new item | posted | posted |
+| C | T0 + 2m | **back-dated behind B** | **dropped** | posted |
+| D | T0 + 10m | ordinary new item | posted | posted |
+| E | T0 + 10m | **same timestamp as D** | **dropped** | posted |
+
+`old  2 posts` / `new  4 posts`. C is Cealgair's report and E is jdcoolha's, and
+the pre-patch arm logs `No new posts found` for both while continuing to complete
+every cycle normally. The patched arm sent each item exactly once; repeated
+cycles over the following minutes added no duplicates.
+
+Persistence was checked separately, with `PersistenceOnShutdown: true` and
+`feed_dump.csv` mounted:
+
+- Identities accumulate in the row as posts are sent, and the date column holds
+  the feed's watermark rather than the save time -- `2026-08-27T22:21:51` for a
+  save made at `22:21:56`, which is the pre-patch bug not reproducing.
+- Restarting the container re-posted nothing (3 posts before, 3 after).
+- A hand-written legacy three-column row dated after every item in the feed --
+  the realistic upgrade shape, since the old code stored `DateTime.Now` -- loaded
+  cleanly and posted nothing.
+- A `<guid>` of `urn:fctest:na,sty"quote` round-tripped as
+  `"urn:fctest:na,sty""quote"` and was still recognised after a restart,
+  exercising the RFC 4180 path that the old `Split(',')` would have mangled.
+
+The image builds clean on `mcr.microsoft.com/dotnet/sdk:9.0`: 0 errors, and the
+same 2 pre-existing warnings (`CS8625` on `Post.Labels`, `CS8604` in
+`RssParsingService`) as before the patch.
+
+### What this still does not fix
+
+- **Back-dating deeper than the feed's own window**, once the identity set has
+  filled and the floor has started advancing. In practice that needs 500 distinct
+  posts from one feed *and* an item dated behind the oldest entry the feed still
+  carries.
+- **The YouTube path**, which reads only the single most recent `<entry>` per
+  fetch. Identity tracking is correct there but has nothing extra to work with,
+  so a back-dated video is still missed. That is a limitation of
+  `FetchYoutubeAsync`, not of the detection logic.
+- **Items whose `pubDate` fails to parse** sit at `default(DateTime)` and remain
+  below any floor, so they never post. Making them post on identity alone would
+  be defensible, but it risks a burst on first sight of such a feed and is left
+  out of this patch deliberately.
+
+### Upstream
+
+Offered as [#101](https://github.com/Qolors/FeedCord/pull/101). It fixes a
+five-reporter issue with no new configuration surface and the state file stays
+backward compatible, but it is a larger change than Patches 1-3 and touches the
+file format, so it may well need discussion.
+
+The submitted version differs in one place: upstream has no read-merge-write
+persist, so its `SaveDataToCsv` writes the identity tail in the existing
+append-only, shutdown-only shape.
+
 ## A known upstream issue this does NOT fix
 
-If you are here because a feed stopped posting, this is the more likely cause.
+If you are here because a feed stopped posting, check Patch 2 (the loop stalls
+entirely) and Patch 6 (the loop runs but classifies everything as old) first.
+If neither fits, this is the remaining candidate.
 
 **A feed that fails once at startup is never polled again for the lifetime of
 the process.** The relevant chain:
@@ -290,10 +477,27 @@ discarding them at startup. That is a larger change than this fork carries.
 
 ## Upstreaming
 
-The compression patch is a reasonable candidate to send upstream: it is a small
-strict improvement with no new configuration surface. It has not been
-submitted. The startup-probe issue above is worth an issue report in its own
-right, and is the more valuable of the two.
+Four of the six patches have been offered back to upstream, each as a single
+commit on a branch off `upstream/master`:
+
+| Patch | Upstream PR |
+| ----- | ----------- |
+| 1 — negotiate compression | [#99](https://github.com/Qolors/FeedCord/pull/99) |
+| 2 — throttle re-entrancy | [#98](https://github.com/Qolors/FeedCord/pull/98) |
+| 3 — isolate item parsing | [#100](https://github.com/Qolors/FeedCord/pull/100) |
+| 6 — identity-based detection | [#101](https://github.com/Qolors/FeedCord/pull/101) |
+
+Patches 4 and 5 are cherry-picks from other forks and are theirs to submit.
+
+Patch 6 needed adapting on the way out: it sits on top of Patch 4's
+read-merge-write persist here, but upstream's `SaveDataToCsv` is still
+append-only and still runs only from `OnShutdown`, so the submitted version
+writes the identity tail in that shape instead. The PR notes that pairing it
+with a read-merge-write would be worth doing if a per-cycle persist ever lands
+upstream.
+
+The startup-probe issue above is worth an issue report in its own right, and is
+arguably more valuable than any of these.
 
 ## Building
 

@@ -16,7 +16,7 @@ This is a fork of **[Qolors/FeedCord](https://github.com/Qolors/FeedCord)**, and
 
 **All credit for FeedCord belongs to [Qolors](https://github.com/Qolors).** The idea, the design, and essentially all of the code are theirs — this fork is a small stack of patches sitting on top of their work. Thank you for building it, and for releasing it under the MIT license so the rest of us could keep it running.
 
-This is not a competing project and is not trying to become one. Fixes made here are offered back upstream wherever they apply cleanly — currently [#98](https://github.com/Qolors/FeedCord/pull/98), [#99](https://github.com/Qolors/FeedCord/pull/99) and [#100](https://github.com/Qolors/FeedCord/pull/100) — and if upstream picks up again, that is the better home for this work.
+This is not a competing project and is not trying to become one. Fixes made here are offered back upstream wherever they apply cleanly — currently [#98](https://github.com/Qolors/FeedCord/pull/98), [#99](https://github.com/Qolors/FeedCord/pull/99), [#100](https://github.com/Qolors/FeedCord/pull/100) and [#101](https://github.com/Qolors/FeedCord/pull/101) — and if upstream picks up again, that is the better home for this work.
 
 What this fork changes is summarized in the [fork changelog](#fork-changes) and documented in full in [PATCHES.md](PATCHES.md).
 
@@ -151,7 +151,7 @@ docker run --name FeedCord -v "/path/to/your/appsettings.json:/app/config/appset
 
 > **Fork note — mount `feed_dump.csv` if you set `PersistenceOnShutdown: true`.**
 >
-> The watermark of the last-seen post per feed is written to
+> Each feed's watermark and the identities of the posts already sent are written to
 > `AppContext.BaseDirectory`, which is `/app` in the container. With only
 > `appsettings.json` mounted, that file lives in the container's writable layer
 > and is destroyed by any `docker run --rm`, `docker compose up --force-recreate`,
@@ -171,7 +171,7 @@ docker run --name FeedCord -v "/path/to/your/appsettings.json:/app/config/appset
 > ```
 >
 > The file must be writable by the container's user (`APP_UID`, 1654 by default).
-> This fork also saves the watermark after every check cycle rather than only on
+> This fork also saves this state after every check cycle rather than only on
 > a graceful shutdown, so a container that is killed or hangs loses at most one
 > interval's progress instead of everything since the last clean stop.
 
@@ -233,6 +233,9 @@ Changes carried in this fork that are not in upstream `master`. Each has a full 
 - **One malformed item discarded every post from that feed for the cycle.** Item parsing is now isolated per entry, so a bad entry is logged and skipped instead of blocking the feed. ([`ca54997`](https://github.com/fadwen/FeedCord/commit/ca54997)) — offered upstream as [#100](https://github.com/Qolors/FeedCord/pull/100)
 - **`feed_dump.csv` was destroyed by container recreation, and multiple Instances clobbered each other's rows.** Persistence is now a semaphore-guarded read-merge-write. ([`0c7d6f3`](https://github.com/fadwen/FeedCord/commit/0c7d6f3)) — cherry-picked from [Sepperlot](https://github.com/sepperlot) ([`157303f`](https://github.com/sepperlot/FeedCord/commit/157303fde5cea71fb5e9cbaf60154cc31fc17809))
 - **State was saved only on a graceful shutdown.** It is now persisted after every check cycle, so an ungraceful stop loses at most one interval's progress. ([`298b4ab`](https://github.com/fadwen/FeedCord/commit/298b4ab)) — cherry-picked from [Sepperlot](https://github.com/sepperlot) ([`fb27bb4`](https://github.com/sepperlot/FeedCord/commit/fb27bb45dce83169a96c3f19a626a110060f164b))
+- **Feeds went silent while the loop ran normally, logging `No new posts found` against a feed with new items.** Detection rested on a single high-water publish date per feed, so an item added behind that date — a publisher back-dating, or a generator that adds articles hours after their publish time — could never be seen again, and a feed whose timestamps carry no time component posted only one item per day. Posts are now recognised by their own `<guid>`/`<id>`, with the date kept only as a first-run floor. Fixes upstream [#94](https://github.com/Qolors/FeedCord/issues/94). **`feed_dump.csv` gains a variable-length tail of post identities and is now RFC 4180; existing three-column files load unchanged and no migration is needed.** ([`49bb274`](https://github.com/fadwen/FeedCord/commit/49bb274)) — offered upstream as [#101](https://github.com/Qolors/FeedCord/pull/101)
+- **A restart baselined every feed to the moment of the last save.** `feed_dump.csv` stored `DateTime.Now` rather than the feed's own watermark, so anything published behind that instant was treated as already-seen. It now stores the watermark. ([`49bb274`](https://github.com/fadwen/FeedCord/commit/49bb274))
+- **A healthy but quiet feed accumulated errors against it**, and could be dropped by `EnableAutoRemove` for publishing nothing. The error count now clears on any successful fetch. ([`49bb274`](https://github.com/fadwen/FeedCord/commit/49bb274))
 
 ### Changed
 
