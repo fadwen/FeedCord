@@ -1,4 +1,5 @@
 ﻿using FeedCord.Common;
+using FeedCord.Helpers;
 using FeedCord.Core.Interfaces;
 using FeedCord.Services.Interfaces;
 using Microsoft.Extensions.Hosting;
@@ -99,12 +100,31 @@ namespace FeedCord.Infrastructure.Workers
 
         private void SaveDataToCsv(IReadOnlyDictionary<string, FeedState> data)
         {
-            var filePath = Path.Combine(AppContext.BaseDirectory, "feed_dump.csv");
+            var filePath = CsvReader.DefaultFilePath;
             using var writer = new StreamWriter(filePath, append: true);
 
             foreach (var (key, value) in data)
             {
-                writer.WriteLine($"{key},{value.IsYoutube},{DateTime.Now}");
+                var fields = new List<string>
+                {
+                    key,
+                    value.IsYoutube.ToString(),
+                    // The feed's own watermark, not the wall clock. Saving
+                    // DateTime.Now here meant a restart baselined every feed to
+                    // the moment of the last save, so anything a publisher
+                    // back-dated behind that instant was invisible from then on.
+                    //
+                    // ISO 8601 also round-trips: CsvReader parses with
+                    // InvariantCulture, which DateTime.Now's default formatting
+                    // matches only while the process culture happens to be
+                    // invariant. A row that fails to parse is skipped whole,
+                    // taking its identities with it.
+                    value.LastPublishDate.ToString("yyyy-MM-ddTHH:mm:ss")
+                };
+
+                fields.AddRange(value.SeenPosts.Snapshot());
+
+                writer.WriteLine(Csv.FormatLine(fields));
             }
         }
     }

@@ -118,7 +118,7 @@ namespace FeedCord.Services.Helpers
             var decAuthor = DecodeContent(author);
 
             if (trim == 0) 
-                return new Post(title, imageLink, description, link, subtitle, pubDate, author, Array.Empty<string>());
+                return new Post(title, imageLink, description, link, subtitle, pubDate, author, Array.Empty<string>(), post.Id ?? string.Empty);
             
             if (description.Length > trim)
             {
@@ -133,7 +133,8 @@ namespace FeedCord.Services.Helpers
                 decSubtitle, 
                 pubDate, 
                 decAuthor,
-                Array.Empty<string>());
+                Array.Empty<string>(),
+                post.Id ?? string.Empty);
         }
 
         private static Post TryBuildGitlabPost(
@@ -188,7 +189,8 @@ namespace FeedCord.Services.Helpers
                 Tag: subtitle,
                 PublishDate: pubDate,
                 Author: author,
-                Labels: labels
+                Labels: labels,
+                Id: post.Id ?? string.Empty
             );
         }
 
@@ -273,7 +275,8 @@ namespace FeedCord.Services.Helpers
                 Tag: subtitle,
                 PublishDate: pubDate,
                 Author: author,
-                Labels: Array.Empty<string>()
+                Labels: Array.Empty<string>(),
+                Id: post.Id ?? string.Empty
             );
         }
 
