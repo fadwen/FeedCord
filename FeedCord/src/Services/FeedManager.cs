@@ -95,57 +95,48 @@ namespace FeedCord.Services
 
             foreach (var url in urls)
             {
+                // The probe only informs the startup count. Every configured
+                // feed is registered regardless: InitializeUrlsAsync runs once
+                // per process, so a feed dropped here for one transient failure
+                // (a timeout, a challenge page) was never polled again until a
+                // restart. The poll path already tolerates a failing fetch, so
+                // a feed that is down at boot is simply picked up on the first
+                // cycle it answers.
                 var isSuccess = await TestUrlAsync(url);
 
-                if (!isSuccess)
-                {
-                    continue;
-                }
-
-                if (_lastRunReference.TryGetValue(url, out var value))
-                {
-                    _feedStates.TryAdd(url, new FeedState
+                var state = _lastRunReference.TryGetValue(url, out var value)
+                    ? new FeedState
                     {
                         IsYoutube = isYoutube,
                         LastPublishDate = value.LastRunDate,
                         ErrorCount = 0,
                         SeenPosts = new SeenPostSet(value.SeenIds)
-                    });
+                    }
+                    : new FeedState
+                    {
+                        IsYoutube = isYoutube,
+                        // First sight: baseline at now so the backlog is not
+                        // dumped. Set at registration, not first success, so
+                        // anything published while the feed was unreachable
+                        // still posts once it recovers.
+                        LastPublishDate = DateTime.Now,
+                        ErrorCount = 0
+                    };
 
-                    successCount++;
-
+                if (!_feedStates.TryAdd(url, state))
+                {
+                    _logger.LogWarning("Failed to initialize URL: {Url}", url);
                     continue;
                 }
 
-                bool successfulAdd;
-
-                if (isYoutube)
-                {
-                    successfulAdd = _feedStates.TryAdd(url, new FeedState
-                    {
-                        IsYoutube = true,
-                        LastPublishDate = DateTime.Now,
-                        ErrorCount = 0
-                    });
-                }
-                else
-                {
-                    successfulAdd = _feedStates.TryAdd(url, new FeedState
-                    {
-                        IsYoutube = false,
-                        LastPublishDate = DateTime.Now,
-                        ErrorCount = 0
-                    });
-                }
-
-                if (successfulAdd)
+                if (isSuccess)
                 {
                     successCount++;
                 }
-
                 else
                 {
-                    _logger.LogWarning("Failed to initialize URL: {Url}", url);
+                    _logger.LogWarning(
+                        "Startup check failed for {Url}; it stays registered and will be retried every cycle", url);
                 }
             }
 
