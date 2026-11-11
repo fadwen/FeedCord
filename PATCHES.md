@@ -1,7 +1,7 @@
 # Fork notes
 
 This is a fork of [Qolors/FeedCord](https://github.com/Qolors/FeedCord) carrying
-six local patches. `master` is upstream `master` plus those commits, and the
+seven local patches. `master` is upstream `master` plus those commits, and the
 image is built from source rather than pulled from a registry. Several are
 cherry-picked from other forks and keep their original author.
 
@@ -442,42 +442,77 @@ The submitted version differs in one place: upstream has no read-merge-write
 persist, so its `SaveDataToCsv` writes the identity tail in the existing
 append-only, shutdown-only shape.
 
-## A known upstream issue this does NOT fix
+## Patch 7: keep feeds that fail the startup check
 
-If you are here because a feed stopped posting, check Patch 2 (the loop stalls
-entirely) and Patch 6 (the loop runs but classifies everything as old) first.
-If neither fits, this is the remaining candidate.
+**Files:** `FeedCord/src/Services/FeedManager.cs`
 
-**A feed that fails once at startup is never polled again for the lifetime of
-the process.** The relevant chain:
-
-- `FeedWorker` guards initialization with `_isInitialized`, so
-  `InitializeUrlsAsync()` runs exactly once per process.
-- `FeedManager.GetSuccessCount()` calls `TestUrlAsync(url)` and, on failure,
-  `continue`s — the URL is never inserted into `_feedStates`.
-- `FeedManager.CheckForNewPostsAsync()` iterates `_feedStates` only.
-
-So the poll loop has no knowledge of a URL that failed its one-shot probe.
-There is no retry, no backoff, and no re-probe. Only a container restart brings
-it back, and only if the origin happens to be healthy at that moment. The sole
-symptom is the startup line reporting a lower count than you configured:
+Symptom: a feed stops posting and the container shows nothing wrong. It is up,
+the loop runs, every batch summary completes, and that feed is simply never
+mentioned again. Only a restart brings it back. The one trace is the startup
+line reporting fewer feeds than you configured:
 
 ```
 Tested successfully for N out of M Urls in Configuration File
 ```
 
-In practice the failures seen on this deployment were not slow transfers at
-all. They were bot challenges from a Cloudflare-fronted origin — `403` with
-`cf-mitigated: challenge`, and the 30s being consumed by the challenge rather
-than by any payload. Compression cannot help with that, and neither can any
-change confined to the HTTP handler. Those feeds stay dropped until restart.
+If a feed stopped posting, check Patch 2 (the loop stalls entirely) and Patch 6
+(the loop runs but classifies everything as old) first. This is the case where
+the feed has disappeared from the batch summary altogether.
 
-Fixing this properly means re-probing failed URLs on the poll cycle instead of
-discarding them at startup. That is a larger change than this fork carries.
+### Cause
+
+- `FeedWorker` guards initialization with `_isInitialized`, so
+  `InitializeUrlsAsync()` runs exactly once per process.
+- `FeedManager.GetSuccessCount()` called `TestUrlAsync(url)` and, on failure,
+  `continue`d, so the URL was never inserted into `_feedStates`.
+- `FeedManager.CheckForNewPostsAsync()` iterates `_feedStates` only.
+
+So one failed probe at boot removed a feed for the life of the process. Nothing
+retried it, and the poll loop never knew it existed. The failures seen on this
+deployment were transient: request timeouts, and Cloudflare bot challenges
+(`403` with `cf-mitigated: challenge`) that used up the 30s timeout.
+
+### The change
+
+Every configured feed is now registered whether or not its startup probe
+succeeds. The probe still runs, and still sets the `N out of M` count, but a
+failure only logs:
+
+```
+Startup check failed for <url>; it stays registered and will be retried every cycle
+```
+
+Nothing else had to change to make this safe. `FetchRssAsync` and
+`FetchYoutubeAsync` already catch fetch errors and return an empty list, so a
+feed that is still down gets a warning each cycle and is picked up on the
+first cycle it answers. Because those methods swallow the error,
+`HandleFeedError` and `EnableAutoRemove` are not reached on this path, so a
+feed that is permanently wrong keeps being polled, and logged, rather than
+silently dropped.
+
+The first-sight baseline (`LastPublishDate = DateTime.Now` for a feed not in
+`feed_dump.csv`) is set when the feed is registered, not on its first
+successful fetch. Items published while the feed was unreachable are therefore
+still posted once it recovers, and the backlog from before startup is still
+not.
+
+### Verifying
+
+Point one entry in `RssUrls` at an address that times out or refuses
+connections (for example a non-routable IP), start the container, and confirm
+the startup warning above. Then make the URL reachable. The next cycle's batch
+summary should list it, and new items should post.
+
+Observed on this deployment on the first boot of the patched image: two feeds
+on one Cloudflare-fronted host failed the startup check with `522` (origin
+unreachable, the homepage included). The startup line read `32 out of 34`, and
+the first batch summary still reported `34 URLs tested with 2 failed
+responses` and listed all 34 feeds. Under the old code those two would have
+dropped out of every later summary until a restart.
 
 ## Upstreaming
 
-Four of the six patches have been offered back to upstream, each as a single
+Four of the seven patches have been offered back to upstream, each as a single
 commit on a branch off `upstream/master`:
 
 | Patch | Upstream PR |
@@ -496,8 +531,8 @@ writes the identity tail in that shape instead. The PR notes that pairing it
 with a read-merge-write would be worth doing if a per-cycle persist ever lands
 upstream.
 
-The startup-probe issue above is worth an issue report in its own right, and is
-arguably more valuable than any of these.
+Patch 7 has not been offered upstream yet. It is a small, self-contained change
+and a good candidate.
 
 ## Building
 
